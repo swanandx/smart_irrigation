@@ -1,4 +1,7 @@
-use actix_web::{dev::ServiceRequest, get, post, web, App, Error, HttpServer, Responder, HttpResponse, HttpResponseBuilder, http::StatusCode};
+use actix_web::{
+    dev::ServiceRequest, get, http::StatusCode, post, web, App, Error, HttpResponse,
+    HttpResponseBuilder, HttpServer, Responder,
+};
 use actix_web_httpauth::{
     extractors::{
         bearer::{self, BearerAuth},
@@ -6,6 +9,10 @@ use actix_web_httpauth::{
     },
     middleware::HttpAuthentication,
 };
+use rumqttc::{AsyncClient, MqttOptions, QoS};
+use std::time::Duration;
+
+const TOPIC: &str = "edi_15";
 
 #[derive(serde::Deserialize)]
 pub struct FormData {
@@ -31,12 +38,16 @@ async fn validator(
 }
 
 #[get("/off", wrap = "HttpAuthentication::bearer(validator)")]
-async fn turn_off() -> impl Responder {
+async fn turn_off(data: web::Data<AsyncClient>) -> impl Responder {
+    data.publish(TOPIC, QoS::AtMostOnce, false, "OFF")
+        .await
+        .ok();
     web::Json("Turned motor OFF\n")
 }
 
 #[get("/on", wrap = "HttpAuthentication::bearer(validator)")]
-async fn turn_on() -> impl Responder {
+async fn turn_on(data: web::Data<AsyncClient>) -> impl Responder {
+    data.publish(TOPIC, QoS::AtMostOnce, false, "ON").await.ok();
     web::Json("Turned motor ON\n")
 }
 
@@ -62,6 +73,34 @@ fn get_data() -> std::io::Result<Vec<u8>> {
     Ok([0, 10, 50, 10, 30].to_vec())
 }
 
+fn get_mqtt() -> AsyncClient {
+    let mut mqttoptions = MqttOptions::new("my-client-x123", "broker.hivemq.com", 1883);
+    mqttoptions.set_keep_alive(Duration::from_secs(10));
+
+    let (client, mut eventloop) = AsyncClient::new(mqttoptions, 10);
+    tokio::spawn(async move {
+        loop {
+            let event = eventloop.poll().await;
+            match &event {
+                // Ok(rumqttc::Event::Outgoing(rumqttc::Outgoing::Publish(v))) => {
+                //     println!("Publishing {v:?}");
+                // }
+                Ok(v) => {
+                    println!("Event: {v:?}");
+                }
+                Err(e) => {
+                    println!("Error = {e:?}");
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    });
+
+    client
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     HttpServer::new(|| {
@@ -69,6 +108,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(
                 get_data().expect("Failed to get sensor data"),
             ))
+            .app_data(web::Data::new(get_mqtt()))
             .service(
                 web::scope("/api")
                     .service(turn_off)
